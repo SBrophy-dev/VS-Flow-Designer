@@ -1,0 +1,428 @@
+{
+  "name": "vs-flow-designer",
+  "displayName": "VS Flow Designer",
+  "description": "Visualize and edit Amazon Connect contact flows inside VS Code. Import and export flow files locally, and optionally connect your AWS account to download, compare and publish.",
+  "version": "0.0.1",
+  "publisher": "SBrophy-dev",
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "galleryBanner": {
+    "color": "#16233a",
+    "theme": "dark"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "amazon connect",
+    "contact flow",
+    "flow designer",
+    "aws",
+    "contact center",
+    "ivr"
+  ],
+  "pricing": "Free",
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onLanguage:json"
+  ],
+  "contributes": {
+    "customEditors": [
+      {
+        "viewType": "vsFlowDesigner.flowEditor",
+        "displayName": "VS Flow Designer",
+        "selector": [
+          {
+            "filenamePattern": "*.json"
+          }
+        ],
+        "priority": "option"
+      }
+    ],
+    "commands": [
+      {
+        "command": "vsFlowDesigner.openDesigner",
+        "title": "Open in VS Flow Designer",
+        "category": "VS Flow Designer",
+        "icon": "$(type-hierarchy-sub)"
+      },
+      {
+        "command": "vsFlowDesigner.openDesignerToSide",
+        "title": "Open VS Flow Designer to the Side",
+        "category": "VS Flow Designer",
+        "icon": "$(split-horizontal)"
+      },
+      {
+        "command": "vsFlowDesigner.openAsText",
+        "title": "Open as JSON Text",
+        "category": "VS Flow Designer",
+        "icon": "$(json)"
+      },
+      {
+        "command": "vsFlowDesigner.newFlow",
+        "title": "New Contact Flow",
+        "category": "VS Flow Designer",
+        "icon": "$(new-file)"
+      },
+      {
+        "command": "vsFlowDesigner.openSample",
+        "title": "Try the Sample Flow",
+        "category": "VS Flow Designer",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "vsFlowDesigner.importFlow",
+        "title": "Import Flow…",
+        "category": "VS Flow Designer",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "vsFlowDesigner.exportFlow",
+        "title": "Export Flow for Amazon Connect…",
+        "category": "VS Flow Designer",
+        "icon": "$(export)"
+      },
+      {
+        "command": "vsFlowDesigner.copyFlowJson",
+        "title": "Copy Flow JSON to Clipboard",
+        "category": "VS Flow Designer",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "vsFlowDesigner.refreshLocalFlows",
+        "title": "Refresh",
+        "category": "VS Flow Designer",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vsFlowDesigner.connectAws",
+        "title": "Connect AWS Account…",
+        "category": "VS Flow Designer",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "vsFlowDesigner.disconnectAws",
+        "title": "Disconnect AWS Account",
+        "category": "VS Flow Designer",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "vsFlowDesigner.configureAws",
+        "title": "Configure AWS Profile and Region",
+        "category": "VS Flow Designer",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "vsFlowDesigner.downloadFlow",
+        "title": "Download Flow from Amazon Connect",
+        "category": "VS Flow Designer",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "vsFlowDesigner.publishFlow",
+        "title": "Publish Flow to Amazon Connect",
+        "category": "VS Flow Designer",
+        "icon": "$(cloud-upload)"
+      },
+      {
+        "command": "vsFlowDesigner.pullFlow",
+        "title": "Pull Latest from Amazon Connect",
+        "category": "VS Flow Designer",
+        "icon": "$(sync)"
+      },
+      {
+        "command": "vsFlowDesigner.compareWithRemote",
+        "title": "Compare with Amazon Connect",
+        "category": "VS Flow Designer",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "vsFlowDesigner.unlinkFlow",
+        "title": "Unlink File from Amazon Connect",
+        "category": "VS Flow Designer"
+      },
+      {
+        "command": "vsFlowDesigner.refreshExplorer",
+        "title": "Refresh",
+        "category": "VS Flow Designer",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vsFlowDesigner.openRemoteFlow",
+        "title": "Open Flow",
+        "category": "VS Flow Designer"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "vsFlowDesigner.openDesignerToSide",
+          "when": "resourceLangId == json && activeCustomEditorId != vsFlowDesigner.flowEditor && vsFlowDesigner.activeIsFlow",
+          "group": "navigation"
+        },
+        {
+          "command": "vsFlowDesigner.openAsText",
+          "when": "activeCustomEditorId == vsFlowDesigner.flowEditor",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vsFlowDesigner.exportFlow",
+          "when": "activeCustomEditorId == vsFlowDesigner.flowEditor",
+          "group": "navigation@2"
+        },
+        {
+          "command": "vsFlowDesigner.publishFlow",
+          "when": "activeCustomEditorId == vsFlowDesigner.flowEditor && vsFlowDesigner.awsConnected",
+          "group": "navigation@3"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "vsFlowDesigner.openDesigner",
+          "when": "resourceExtname == .json",
+          "group": "navigation@9"
+        },
+        {
+          "command": "vsFlowDesigner.exportFlow",
+          "when": "resourceExtname == .json",
+          "group": "vsFlowDesigner@1"
+        },
+        {
+          "command": "vsFlowDesigner.publishFlow",
+          "when": "resourceExtname == .json && vsFlowDesigner.awsConnected",
+          "group": "vsFlowDesigner@2"
+        },
+        {
+          "command": "vsFlowDesigner.compareWithRemote",
+          "when": "resourceExtname == .json && vsFlowDesigner.awsConnected",
+          "group": "vsFlowDesigner@3"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "vsFlowDesigner.importFlow",
+          "when": "view == vsFlowDesigner.localFlows",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vsFlowDesigner.newFlow",
+          "when": "view == vsFlowDesigner.localFlows",
+          "group": "navigation@2"
+        },
+        {
+          "command": "vsFlowDesigner.refreshLocalFlows",
+          "when": "view == vsFlowDesigner.localFlows",
+          "group": "navigation@3"
+        },
+        {
+          "command": "vsFlowDesigner.downloadFlow",
+          "when": "view == vsFlowDesigner.connectExplorer && vsFlowDesigner.awsConnected",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vsFlowDesigner.refreshExplorer",
+          "when": "view == vsFlowDesigner.connectExplorer && vsFlowDesigner.awsConnected",
+          "group": "navigation@2"
+        },
+        {
+          "command": "vsFlowDesigner.configureAws",
+          "when": "view == vsFlowDesigner.connectExplorer && vsFlowDesigner.awsConnected",
+          "group": "navigation@3"
+        },
+        {
+          "command": "vsFlowDesigner.disconnectAws",
+          "when": "view == vsFlowDesigner.connectExplorer && vsFlowDesigner.awsConnected",
+          "group": "more@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "vsFlowDesigner.exportFlow",
+          "when": "view == vsFlowDesigner.localFlows && viewItem =~ /^localFlow/",
+          "group": "inline@1"
+        },
+        {
+          "command": "vsFlowDesigner.openAsText",
+          "when": "view == vsFlowDesigner.localFlows && viewItem =~ /^localFlow/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "vsFlowDesigner.exportFlow",
+          "when": "view == vsFlowDesigner.localFlows && viewItem =~ /^localFlow/",
+          "group": "2_share@1"
+        },
+        {
+          "command": "vsFlowDesigner.copyFlowJson",
+          "when": "view == vsFlowDesigner.localFlows && viewItem =~ /^localFlow/",
+          "group": "2_share@2"
+        },
+        {
+          "command": "vsFlowDesigner.publishFlow",
+          "when": "view == vsFlowDesigner.localFlows && viewItem =~ /^localFlow/ && vsFlowDesigner.awsConnected",
+          "group": "3_aws@1"
+        },
+        {
+          "command": "vsFlowDesigner.compareWithRemote",
+          "when": "view == vsFlowDesigner.localFlows && viewItem == localFlow.linked && vsFlowDesigner.awsConnected",
+          "group": "3_aws@2"
+        },
+        {
+          "command": "vsFlowDesigner.pullFlow",
+          "when": "view == vsFlowDesigner.localFlows && viewItem == localFlow.linked && vsFlowDesigner.awsConnected",
+          "group": "3_aws@3"
+        },
+        {
+          "command": "vsFlowDesigner.unlinkFlow",
+          "when": "view == vsFlowDesigner.localFlows && viewItem == localFlow.linked",
+          "group": "3_aws@4"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "vsFlowDesigner.openRemoteFlow",
+          "when": "false"
+        },
+        {
+          "command": "vsFlowDesigner.refreshExplorer",
+          "when": "false"
+        },
+        {
+          "command": "vsFlowDesigner.refreshLocalFlows",
+          "when": "false"
+        },
+        {
+          "command": "vsFlowDesigner.connectAws",
+          "when": "!vsFlowDesigner.awsConnected"
+        },
+        {
+          "command": "vsFlowDesigner.disconnectAws",
+          "when": "vsFlowDesigner.awsConnected"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vsFlowDesigner",
+          "title": "VS Flow Designer",
+          "icon": "media/activity-icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "vsFlowDesigner": [
+        {
+          "id": "vsFlowDesigner.localFlows",
+          "name": "Flows",
+          "icon": "media/activity-icon.svg"
+        },
+        {
+          "id": "vsFlowDesigner.connectExplorer",
+          "name": "Amazon Connect",
+          "icon": "media/activity-icon.svg",
+          "visibility": "collapsed"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "vsFlowDesigner.localFlows",
+        "contents": "No contact flows were found in this workspace.\n\nIn the Amazon Connect flow designer, choose Save ▸ Export flow, then import the file here. No AWS account is needed.\n[Import Flow…](command:vsFlowDesigner.importFlow)\n[New Contact Flow](command:vsFlowDesigner.newFlow)\n[Try the Sample Flow](command:vsFlowDesigner.openSample)",
+        "when": "workbenchState != empty"
+      },
+      {
+        "view": "vsFlowDesigner.localFlows",
+        "contents": "Open a folder to see the contact flows it contains, or import a flow file.\n[Open Folder](command:vscode.openFolder)\n[Import Flow…](command:vsFlowDesigner.importFlow)",
+        "when": "workbenchState == empty"
+      },
+      {
+        "view": "vsFlowDesigner.connectExplorer",
+        "contents": "Optional: connect your AWS account to browse, download, compare and publish flows in Amazon Connect directly.\n\nThe designer, import and export work without it.\n[Connect AWS Account…](command:vsFlowDesigner.connectAws)\nCredentials come from your local AWS config (profiles, SSO or environment variables). They are only used to call AWS.",
+        "when": "!vsFlowDesigner.awsConnected"
+      },
+      {
+        "view": "vsFlowDesigner.connectExplorer",
+        "contents": "Choose the AWS profile and Region of your Amazon Connect instance.\n[Configure AWS Profile and Region](command:vsFlowDesigner.configureAws)\n[Disconnect AWS Account](command:vsFlowDesigner.disconnectAws)",
+        "when": "vsFlowDesigner.awsConnected"
+      }
+    ],
+    "configuration": {
+      "title": "VS Flow Designer",
+      "properties": {
+        "vsFlowDesigner.aws.enabled": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Use your AWS credentials to browse, download, compare and publish flows in Amazon Connect. Off by default: the designer, import and export work locally without AWS. Run **VS Flow Designer: Connect AWS Account** to turn it on."
+        },
+        "vsFlowDesigner.aws.profile": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "AWS profile from your shared config/credentials files. Leave empty to use the default credential chain (`AWS_PROFILE`, environment variables, `default` profile)."
+        },
+        "vsFlowDesigner.aws.region": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "AWS Region of your Amazon Connect instances, for example `us-east-1`. Leave empty to use the region from your AWS profile or `AWS_REGION`."
+        },
+        "vsFlowDesigner.flowsFolder": {
+          "type": "string",
+          "default": "contact-flows",
+          "description": "Workspace-relative folder where imported, downloaded and new flows are saved."
+        },
+        "vsFlowDesigner.jsonFormatting": {
+          "type": "string",
+          "enum": [
+            "preserve",
+            "pretty",
+            "compact"
+          ],
+          "enumDescriptions": [
+            "Keep the indentation the file already uses (single-line files stay single-line).",
+            "Always write indented JSON (best for source control diffs).",
+            "Always write single-line JSON, the same as Amazon Connect exports."
+          ],
+          "default": "preserve",
+          "description": "How the flow file is formatted when the designer changes it."
+        },
+        "vsFlowDesigner.showCodeLens": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show an \"Open in VS Flow Designer\" CodeLens at the top of JSON files that contain an Amazon Connect flow."
+        },
+        "vsFlowDesigner.confirmBeforePublish": {
+          "type": "boolean",
+          "default": true,
+          "description": "Ask for confirmation before a flow is published to Amazon Connect."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "node esbuild.mjs --production",
+    "compile": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "typecheck": "tsc --noEmit -p .",
+    "pretest": "node esbuild.mjs --tests",
+    "test": "node --test out/test/*.test.js",
+    "icon": "node scripts/generate-icon.mjs",
+    "package": "vsce package --no-dependencies --allow-missing-repository",
+    "publish": "vsce publish --no-dependencies",
+    "test:integration": "node esbuild.mjs && node test/integration/runTest.mjs"
+  },
+  "dependencies": {
+    "@aws-sdk/client-connect": "^3.1156.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0",
+    "@types/vscode": "~1.90.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
+  },
+  "preview": true
+}

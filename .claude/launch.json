@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "webview-harness",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["dev/serve.mjs"],
+      "port": 5199
+    }
+  ]
+}
