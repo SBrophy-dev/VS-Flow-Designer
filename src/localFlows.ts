@@ -141,6 +141,56 @@ export class LocalFlowsProvider implements vscode.TreeDataProvider<LocalFlow>, v
   }
 }
 
+/**
+ * Opens the workspace flow file a block points to. A file matches when it is linked to
+ * the referenced Amazon Connect flow, or when its file name or flow name equals the
+ * reference or the block's display name.
+ */
+export async function openLinkedFlow(reference: string, name: string | undefined, links: LinkStore): Promise<void> {
+  const norm = (value: string) => value.trim().toLowerCase();
+  const id = reference.startsWith('arn:') ? reference.split('/').pop()! : reference;
+  const wanted = new Set([reference, id, name].filter((v): v is string => !!v).map(norm));
+  const matches: { uri: vscode.Uri; name: string }[] = [];
+  for (const uri of await vscode.workspace.findFiles('**/*.json', EXCLUDE, MAX_FILES)) {
+    const link = links.get(uri);
+    const base = path.basename(uri.fsPath, '.json');
+    if ((link && (wanted.has(norm(link.flowId)) || (link.flowName && wanted.has(norm(link.flowName))))) || wanted.has(norm(base))) {
+      matches.push({ uri, name: link?.flowName ?? base });
+      continue;
+    }
+    try {
+      if ((await vscode.workspace.fs.stat(uri)).size > MAX_FILE_SIZE) {
+        continue;
+      }
+      const text = new TextDecoder().decode(await vscode.workspace.fs.readFile(uri));
+      if (!text.includes('"Actions"')) {
+        continue;
+      }
+      const value: unknown = JSON.parse(text);
+      if (looksLikeFlow(value) && value.Metadata?.name && wanted.has(norm(value.Metadata.name))) {
+        matches.push({ uri, name: value.Metadata.name });
+      }
+    } catch {
+      // Not readable JSON: not a match.
+    }
+  }
+  const label = name ?? reference;
+  if (matches.length === 0) {
+    void vscode.window.showInformationMessage(`No flow file for "${label}" was found in this workspace.`);
+    return;
+  }
+  const pick =
+    matches.length === 1
+      ? matches[0]
+      : await vscode.window.showQuickPick(
+          matches.map((m) => ({ label: m.name, description: vscode.workspace.asRelativePath(m.uri), match: m })),
+          { title: `Several files match "${label}"` },
+        ).then((item) => item?.match);
+  if (pick) {
+    await vscode.commands.executeCommand('vscode.openWith', pick.uri, FLOW_EDITOR_VIEW_TYPE);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Import / export (local files only, no AWS)
 

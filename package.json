@@ -2,7 +2,7 @@
   "name": "vs-flow-designer",
   "displayName": "VS Flow Designer",
   "description": "Visualize and edit Amazon Connect contact flows inside VS Code. Import and export flow files locally, and optionally connect your AWS account to download, compare and publish.",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "SBrophy-dev",
   "license": "MIT",
   "icon": "images/icon.png",

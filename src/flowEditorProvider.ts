@@ -3,6 +3,7 @@ import { detectIndent, serializeFlow } from './shared/flowModel';
 import type { HostToWebview, WebviewToHost } from './shared/messages';
 import type { LinkStore } from './connect/linkStore';
 import { awsEnabled } from './connect/connectService';
+import { openLinkedFlow } from './localFlows';
 
 export const FLOW_EDITOR_VIEW_TYPE = 'vsFlowDesigner.flowEditor';
 
@@ -108,6 +109,9 @@ export class FlowEditorProvider implements vscode.CustomTextEditorProvider {
         }
         case 'command':
           await this.runCommand(message.command, document.uri);
+          break;
+        case 'openFlow':
+          await openLinkedFlow(message.reference, message.name, this.links);
           break;
         case 'notify': {
           const show =

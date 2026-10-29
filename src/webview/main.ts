@@ -21,12 +21,17 @@ import {
   createAction,
   deleteActions,
   duplicateActions,
+  edgeKey,
   ensurePositions,
   findAction,
+  findLoopEdges,
   getOutputs,
   getPosition,
+  linkedFlowRef,
   nodeHeight,
   parseFlow,
+  reachableFrom,
+  reachingTo,
   removeBranch,
   setOutputTarget,
   setPosition,
@@ -35,6 +40,7 @@ import {
   type ContactFlow,
   type FlowAction,
   type FlowIssue,
+  type OutputKind,
   type Position,
 } from '../shared/flowModel';
 import type { HostToWebview, RemoteLinkInfo, WebviewCommand, WebviewToHost } from '../shared/messages';
@@ -51,6 +57,8 @@ interface SavedState {
   paletteOpen: boolean;
   inspectorOpen: boolean;
   selection: string[];
+  showErrorLines?: boolean;
+  leftTab?: 'outline' | 'blocks';
 }
 
 declare function acquireVsCodeApi(): VsCodeApi;
@@ -103,6 +111,11 @@ const state = {
   inspectorOpen: saved?.inspectorOpen ?? true,
   selection: new Set<string>(saved?.selection ?? []),
   selectedEdge: undefined as { from: string; key: string } | undefined,
+  /** Draw error branches as lines; otherwise they show as "→ Block" labels. */
+  showErrorLines: saved?.showErrorLines ?? false,
+  leftTab: saved?.leftTab ?? ('outline' as 'outline' | 'blocks'),
+  /** Highlights every path into ("to") or out of ("from") a block. */
+  trace: undefined as { id: string; mode: 'to' | 'from' } | undefined,
   search: '',
   searchIndex: -1,
   paletteFilter: '',
@@ -117,6 +130,8 @@ function persist(): void {
     paletteOpen: state.paletteOpen,
     inspectorOpen: state.inspectorOpen,
     selection: [...state.selection],
+    showErrorLines: state.showErrorLines,
+    leftTab: state.leftTab,
   });
 }
 
@@ -153,6 +168,10 @@ const overlay = h('div', { class: 'overlay', hidden: true });
 const hint = h('div', { class: 'hint' });
 const inspector = h('aside', { class: 'inspector' });
 const banner = h('div', { class: 'banner', hidden: true });
+const hoverCard = h('div', { class: 'hover-card', hidden: true });
+const edgeTip = h('div', { class: 'edge-tip', hidden: true });
+const traceBar = h('div', { class: 'trace-bar', hidden: true });
+const legend = h('div', { class: 'legend' });
 
 edgesSvg.append(
   s(
@@ -168,7 +187,7 @@ edgesSvg.append(
   ),
 );
 world.append(edgesSvg, nodesLayer);
-canvas.append(world, marquee, hint, overlay);
+canvas.append(world, marquee, hint, legend, traceBar, hoverCard, edgeTip, overlay);
 app.append(toolbar, banner, h('div', { class: 'main' }, palette, canvas, inspector));
 
 // ---------------------------------------------------------------------------
@@ -199,10 +218,85 @@ function inputPoint(id: string): Position {
   return { x: p.x, y: p.y + NODE_HEADER_HEIGHT / 2 };
 }
 
-function edgePath(a: Position, b: Position): string {
-  const dx = b.x - a.x;
-  const bend = dx > 0 ? Math.max(40, dx / 2) : Math.max(80, Math.abs(dx) / 3 + 60);
-  return `M ${a.x} ${a.y} C ${a.x + bend} ${a.y}, ${b.x - bend} ${b.y}, ${b.x} ${b.y}`;
+interface Box {
+  top: number;
+  bottom: number;
+}
+
+interface Rect extends Box {
+  left: number;
+  right: number;
+}
+
+/** Horizontal run out of an output dot before a connection may turn. */
+const EDGE_STUB = 16;
+/** Gap left of a block where every connection into it shares one vertical trunk. */
+const EDGE_TRUNK_GAP = 28;
+const EDGE_RADIUS = 8;
+
+function boxOf(id: string): Box {
+  const p = positionOf(id);
+  return { top: p.y, bottom: p.y + sizeOf(id).height };
+}
+
+/**
+ * Routes a connection as right-angled segments. Forward connections run level out of the
+ * dot and turn once, on the target's trunk, so several connections into one block merge
+ * into a single line. Connections that go backwards or need room to turn detour through
+ * the gap between the blocks, or under both when they overlap vertically, dropping
+ * below any other block in the way.
+ */
+function edgeRoute(a: Position, b: Position, lane: number, src?: Box, dst?: Box, obstacles: Rect[] = []): Position[] {
+  const room = b.x - a.x;
+  if (room >= 6) {
+    // Blocks placed close together still turn between them rather than looping around.
+    const x = b.x - Math.min(EDGE_TRUNK_GAP, room / 2);
+    return Math.abs(a.y - b.y) < 1 ? [a, b] : [a, { x, y: a.y }, { x, y: b.y }, b];
+  }
+  const trunkX = b.x - EDGE_TRUNK_GAP;
+  const exitX = a.x + EDGE_STUB + lane * 6;
+  let laneY: number;
+  if (!src || !dst) {
+    laneY = (a.y + b.y) / 2;
+  } else if (dst.top - src.bottom > 24) {
+    laneY = (src.bottom + dst.top) / 2;
+  } else if (src.top - dst.bottom > 24) {
+    laneY = (dst.bottom + src.top) / 2;
+  } else {
+    laneY = Math.max(src.bottom, dst.bottom) + 20;
+    const left = Math.min(trunkX, exitX);
+    const right = Math.max(trunkX, exitX);
+    for (let moved = true; moved; ) {
+      moved = false;
+      for (const r of obstacles) {
+        if (r.left < right && r.right > left && r.top < laneY + 4 && r.bottom + 20 > laneY) {
+          laneY = r.bottom + 20;
+          moved = true;
+        }
+      }
+    }
+  }
+  return [a, { x: exitX, y: a.y }, { x: exitX, y: laneY }, { x: trunkX, y: laneY }, { x: trunkX, y: b.y }, b];
+}
+
+/** SVG path through the points with rounded corners. */
+function roundedPath(points: Position[]): string {
+  let d = `M ${points[0].x} ${points[0].y}`;
+  for (let i = 1; i < points.length - 1; i++) {
+    const [p, c, n] = [points[i - 1], points[i], points[i + 1]];
+    const inLen = Math.hypot(c.x - p.x, c.y - p.y);
+    const outLen = Math.hypot(n.x - c.x, n.y - c.y);
+    const r = Math.min(EDGE_RADIUS, inLen / 2, outLen / 2);
+    if (r < 0.5) {
+      d += ` L ${c.x} ${c.y}`;
+      continue;
+    }
+    const start = { x: c.x - ((c.x - p.x) / inLen) * r, y: c.y - ((c.y - p.y) / inLen) * r };
+    const end = { x: c.x + ((n.x - c.x) / outLen) * r, y: c.y + ((n.y - c.y) / outLen) * r };
+    d += ` L ${start.x} ${start.y} Q ${c.x} ${c.y} ${end.x} ${end.y}`;
+  }
+  const last = points[points.length - 1];
+  return `${d} L ${last.x} ${last.y}`;
 }
 
 function toWorld(clientX: number, clientY: number): Position {
@@ -330,7 +424,7 @@ function renderToolbar(): void {
     h(
       'div',
       { class: 'toolbar-group title-group' },
-      button('☰', 'Toggle block palette', () => {
+      button('☰', 'Toggle the left panel (outline and blocks)', () => {
         state.paletteOpen = !state.paletteOpen;
         persist();
         renderPalette();
@@ -348,6 +442,19 @@ function renderToolbar(): void {
       button('+', 'Zoom in (Ctrl+scroll)', () => zoomCenter(1.2)),
       button('Fit', 'Fit the flow to the window (F)', () => fitToScreen()),
       button('Arrange', 'Automatically arrange all blocks', () => arrange(), { disabled: !flow }),
+      button(
+        'Error lines',
+        state.showErrorLines
+          ? 'Error branches are drawn as lines. Click to show them as labels instead.'
+          : 'Error branches show as "→ Block" labels. Click to draw them as lines.',
+        () => {
+          state.showErrorLines = !state.showErrorLines;
+          persist();
+          renderToolbar();
+          renderCanvas();
+        },
+        { class: `btn${state.showErrorLines ? ' active' : ''}`, disabled: !flow },
+      ),
       searchInput,
       h(
         'button',
@@ -399,6 +506,35 @@ function renderPalette(): void {
   if (!state.paletteOpen) {
     return;
   }
+  const tab = (id: 'outline' | 'blocks', label: string, title: string) =>
+    h(
+      'button',
+      {
+        class: `palette-tab${state.leftTab === id ? ' active' : ''}`,
+        title,
+        onClick: () => {
+          state.leftTab = id;
+          persist();
+          renderPalette();
+        },
+      },
+      label,
+    );
+  const tabs = h(
+    'div',
+    { class: 'palette-tabs' },
+    tab('outline', 'Outline', 'The flow as a list, in the order a contact moves through it'),
+    tab('blocks', 'Blocks', 'Blocks you can add to the flow'),
+  );
+  palette.classList.toggle('outline-mode', state.leftTab === 'outline');
+  if (state.leftTab === 'outline') {
+    refreshDerived();
+    const scroll = palette.querySelector('.outline')?.scrollTop ?? 0;
+    const outline = state.flow ? renderOutline(state.flow) : h('div', { class: 'outline' });
+    palette.replaceChildren(tabs, outline);
+    outline.scrollTop = scroll;
+    return;
+  }
   const filter = state.paletteFilter.toLowerCase();
   const groups = CATEGORY_ORDER.map((category) => {
     const items = BLOCKS.filter(
@@ -444,7 +580,127 @@ function renderPalette(): void {
       again?.setSelectionRange(again.value.length, again.value.length);
     },
   });
-  palette.replaceChildren(input, h('div', { class: 'palette-list' }, ...groups));
+  palette.replaceChildren(tabs, input, h('div', { class: 'palette-list' }, ...groups));
+}
+
+interface OutputGroup {
+  target: string | undefined;
+  kind: OutputKind;
+  labels: string[];
+  keys: string[];
+}
+
+/** A block's outputs, with outputs that go to the same block merged into one entry. */
+function groupOutputs(action: FlowAction): OutputGroup[] {
+  const groups: OutputGroup[] = [];
+  for (const o of getOutputs(action)) {
+    const existing = groups.find((g) => g.target === o.target);
+    if (existing) {
+      existing.labels.push(o.label);
+      existing.keys.push(o.key);
+    } else {
+      groups.push({ target: o.target, kind: o.kind, labels: [o.label], keys: [o.key] });
+    }
+  }
+  return groups;
+}
+
+/**
+ * The flow as an indented list. The main path (the first success or condition branch to
+ * a block not listed yet) continues at the same level; other branches nest under their
+ * block; blocks already listed appear as "↪" links.
+ */
+function renderOutline(flow: ContactFlow): HTMLElement {
+  const byId = new Map(flow.Actions.map((a) => [a.Identifier, a]));
+  const seen = new Set<string>();
+  const selected = state.selection.size === 1 ? [...state.selection][0] : undefined;
+
+  const blockRow = (id: string, ref = false, loop = false) => {
+    const action = byId.get(id)!;
+    const summary = summarizeAction(action, flow.Metadata?.ActionMetadata?.[id]);
+    const traced = tracedNodes && !tracedNodes.has(id) ? ' dimmed' : '';
+    return h(
+      'div',
+      {
+        class: `ol-row${ref ? ' ref' : ''}${id === selected ? ' active' : ''}${traced}`,
+        style: { '--cat': CATEGORY_COLORS[getBlockCategory(action.Type)] },
+        title: ref ? 'Already listed above. Click to go to the block.' : 'Go to the block',
+        onClick: () => goTo(id),
+      },
+      ref ? h('span', { class: 'ol-ref' }, loop ? '↻' : '↪') : h('span', { class: 'palette-dot' }),
+      h('span', { class: 'ol-label' }, getBlockLabel(action.Type)),
+      summary ? h('span', { class: 'ol-summary' }, truncate(summary, ref ? 32 : 60)) : null,
+    );
+  };
+  const branchLabel = (g: OutputGroup) => h('span', { class: `ol-branch-label ${g.kind}` }, g.labels.join(' · '));
+
+  const branchItem = (from: string, g: OutputGroup): HTMLElement => {
+    let body: Node;
+    if (!g.target) {
+      body = h('span', { class: 'muted' }, 'not connected');
+    } else if (!byId.has(g.target)) {
+      body = h('span', { class: 'issue-icon' }, '⚠ missing block');
+    } else if (seen.has(g.target)) {
+      body = blockRow(g.target, true, g.keys.some((k) => loopEdges.has(edgeKey(from, k))));
+    } else {
+      body = h('ul', { class: 'ol-chain' }, ...chain(g.target));
+    }
+    return h('li', { class: 'ol-branch' }, branchLabel(g), body);
+  };
+
+  // Walks the main path first so it claims its blocks, then fills in side branches.
+  const chain = (start: string): HTMLElement[] => {
+    const steps: { id: string; li: HTMLElement; others: OutputGroup[] }[] = [];
+    let id: string | undefined = start;
+    let via: OutputGroup | undefined;
+    while (id && !seen.has(id)) {
+      seen.add(id);
+      const groups = groupOutputs(byId.get(id)!);
+      const main = groups.find((g) => g.target && g.kind !== 'error' && byId.has(g.target) && !seen.has(g.target));
+      const li = h('li', { class: 'ol-step' }, via ? h('div', { class: 'ol-connector' }, '↓ ', branchLabel(via)) : null, blockRow(id));
+      steps.push({ id, li, others: groups.filter((g) => g !== main) });
+      via = main;
+      id = main?.target;
+    }
+    for (const step of steps) {
+      if (step.others.length) {
+        step.li.append(h('ul', { class: 'ol-branches' }, ...step.others.map((g) => branchItem(step.id, g))));
+      }
+    }
+    return steps.map((s) => s.li);
+  };
+
+  const items: HTMLElement[] = [
+    h('li', { class: 'ol-step' }, h('div', { class: 'ol-row entry', onClick: () => goTo(ENTRY_ID) }, h('span', { class: 'ol-ref' }, '▶'), 'Entry')),
+  ];
+  if (flow.StartAction && byId.has(flow.StartAction)) {
+    items.push(...chain(flow.StartAction));
+  }
+  const unreachable = flow.Actions.filter((a) => !seen.has(a.Identifier));
+  const rest: HTMLElement[] = [];
+  for (const action of unreachable) {
+    if (!seen.has(action.Identifier)) {
+      rest.push(...chain(action.Identifier));
+    }
+  }
+  return h(
+    'div',
+    { class: 'outline' },
+    h('ul', { class: 'ol-chain root' }, ...items),
+    rest.length ? h('div', { class: 'palette-heading muted' }, 'Not reachable from the start') : null,
+    rest.length ? h('ul', { class: 'ol-chain root' }, ...rest) : null,
+  );
+}
+
+/** Selects a block and scrolls the canvas to it. */
+function goTo(id: string): void {
+  state.selection = new Set([id]);
+  state.selectedEdge = undefined;
+  state.showIssues = false;
+  hideHoverCard();
+  centerOn(id);
+  render();
+  persist();
 }
 
 function matchesSearch(action: FlowAction): boolean {
@@ -476,8 +732,115 @@ function issuesFor(id: string): FlowIssue[] {
   return state.issues.filter((i) => i.actionId === id);
 }
 
+function present(...nodes: (Node | null | undefined)[]): Node[] {
+  return nodes.filter((n): n is Node => !!n);
+}
+
+/** Loop transitions (edgeKey strings) and the blocks they return to. */
+let loopEdges = new Set<string>();
+let loopTargets = new Set<string>();
+/** Blocks on the traced paths, when tracing. */
+let tracedNodes: Set<string> | undefined;
+
+function refreshDerived(): void {
+  const flow = state.flow;
+  loopEdges = flow ? findLoopEdges(flow) : new Set();
+  loopTargets = new Set();
+  for (const action of flow?.Actions ?? []) {
+    for (const o of getOutputs(action)) {
+      if (o.target && loopEdges.has(edgeKey(action.Identifier, o.key))) {
+        loopTargets.add(o.target);
+      }
+    }
+  }
+  if (flow && state.trace && !findAction(flow, state.trace.id)) {
+    state.trace = undefined;
+  }
+  tracedNodes = undefined;
+  if (flow && state.trace) {
+    tracedNodes = state.trace.mode === 'from' ? reachableFrom(flow, state.trace.id) : reachingTo(flow, state.trace.id);
+    if (state.trace.mode === 'to' && flow.StartAction && tracedNodes.has(flow.StartAction)) {
+      tracedNodes.add(ENTRY_ID);
+    }
+  }
+}
+
+function isTraced(from: string, target: string): boolean | undefined {
+  return tracedNodes ? tracedNodes.has(from) && tracedNodes.has(target) : undefined;
+}
+
+/** Error branches show as labels unless lines are on or the branch is in focus. */
+function errorAsLabel(from: string, target: string): boolean {
+  return !state.showErrorLines && !state.selection.has(from) && !state.selection.has(target) && !isTraced(from, target);
+}
+
+/**
+ * Short block name for labels: "Disconnect / hang up" becomes "Disconnect". When the flow
+ * has several blocks of that type, the start of the summary tells them apart.
+ */
+function shortLabel(id: string): string {
+  const flow = state.flow;
+  const action = flow && findAction(flow, id);
+  if (!action) {
+    return id.slice(0, 8);
+  }
+  const name = getBlockLabel(action.Type).split(' / ')[0];
+  const summary = summarizeAction(action, flow.Metadata?.ActionMetadata?.[id]);
+  const shared = flow.Actions.some((a) => a.Type === action.Type && a.Identifier !== id);
+  return shared && summary ? `${truncate(name, 14)}: ${summary}` : truncate(name, 20);
+}
+
+function startTrace(id: string, mode: 'to' | 'from'): void {
+  state.trace = { id, mode };
+  renderCanvas();
+  renderPalette();
+  renderInspector();
+}
+
+function clearTrace(): void {
+  if (state.trace) {
+    state.trace = undefined;
+    renderCanvas();
+    renderPalette();
+    renderInspector();
+  }
+}
+
+function renderTraceBar(): void {
+  const flow = state.flow;
+  const action = flow && state.trace && findAction(flow, state.trace.id);
+  traceBar.hidden = !action;
+  if (!action || !state.trace || !tracedNodes) {
+    return;
+  }
+  const { id, mode } = state.trace;
+  const count = [...tracedNodes].filter((n) => n !== ENTRY_ID && n !== id).length;
+  traceBar.replaceChildren(
+    h('span', {}, mode === 'to' ? 'Paths to ' : 'Paths from ', h('strong', {}, getBlockLabel(action.Type)), h('span', { class: 'muted' }, ` · ${count} other block${count === 1 ? '' : 's'}`)),
+    button(mode === 'to' ? 'Show paths from here' : 'Show paths to here', 'Switch direction (Shift+T / T)', () => startTrace(id, mode === 'to' ? 'from' : 'to'), { class: 'btn small' }),
+    button('Clear', 'Stop tracing (Esc)', clearTrace, { class: 'btn small' }),
+  );
+}
+
+function renderLegend(): void {
+  const line = (kind: string, label: string) => h('span', { class: 'legend-item' }, h('span', { class: `legend-line ${kind}` }), label);
+  legend.replaceChildren(
+    ...present(
+      line('next', 'Success'),
+      line('condition', 'Condition'),
+      line('error', 'Error'),
+      h('span', { class: 'legend-item' }, h('span', { class: 'legend-loop' }, '↻'), 'Loop'),
+      state.showErrorLines ? null : h('span', { class: 'legend-item' }, h('span', { class: 'stub legend-stub' }, '→ Block'), 'Error label (click to jump)'),
+    ),
+  );
+}
+
 function renderCanvas(): void {
   const flow = state.flow;
+  refreshDerived();
+  renderTraceBar();
+  renderLegend();
+  legend.hidden = !flow;
   overlay.hidden = !!flow;
   banner.hidden = !(flow && state.error);
   if (flow && state.error) {
@@ -533,7 +896,7 @@ function renderCanvas(): void {
     h(
       'div',
       {
-        class: `node entry${state.selection.has(ENTRY_ID) ? ' selected' : ''}`,
+        class: `node entry${state.selection.has(ENTRY_ID) ? ' selected' : ''}${tracedNodes && !tracedNodes.has(ENTRY_ID) ? ' dimmed' : ''}`,
         dataset: { id: ENTRY_ID },
         style: { left: `${entry.x}px`, top: `${entry.y}px`, width: `${ENTRY_WIDTH}px`, height: `${ENTRY_HEIGHT}px` },
       },
@@ -548,13 +911,17 @@ function renderCanvas(): void {
     const category = getBlockCategory(action.Type);
     const nodeIssues = issuesFor(id);
     const worst = nodeIssues.some((i) => i.severity === 'error') ? 'error' : nodeIssues.some((i) => i.severity === 'warning') ? 'warning' : '';
-    const summary = summarizeAction(action, flow.Metadata?.ActionMetadata?.[id]);
+    const meta = flow.Metadata?.ActionMetadata?.[id];
+    const summary = summarizeAction(action, meta);
+    const link = linkedFlowRef(action, meta);
     const classes = ['node'];
     if (state.selection.has(id)) {
       classes.push('selected');
     }
     if (searching) {
       classes.push(matchesSearch(action) ? 'match' : 'dimmed');
+    } else if (tracedNodes) {
+      classes.push(tracedNodes.has(id) ? (state.trace?.id === id ? 'match' : '') : 'dimmed');
     }
     if (flow.StartAction === id) {
       classes.push('start');
@@ -566,16 +933,19 @@ function renderCanvas(): void {
           class: classes.join(' '),
           dataset: { id },
           style: { left: `${p.x}px`, top: `${p.y}px`, width: `${NODE_WIDTH}px`, '--cat': CATEGORY_COLORS[category] },
-          title: `${getBlockLabel(action.Type)} (${action.Type})\n${id}${nodeIssues.length ? `\n\n${nodeIssues.map((i) => `• ${i.message}`).join('\n')}` : ''}`,
         },
         h('span', { class: 'port in', title: 'Drop a connection here' }),
         h(
           'div',
           { class: 'node-header' },
           h('span', { class: 'node-title' }, getBlockLabel(action.Type)),
+          loopTargets.has(id) ? h('span', { class: 'node-loop', title: 'A loop comes back to this block' }, '↻') : null,
+          link
+            ? h('button', { class: 'node-link', title: `Open the linked ${link.kind}: ${link.name}`, dataset: { ref: link.reference, name: link.name } }, '↗')
+            : null,
           worst ? h('span', { class: `node-badge ${worst}` }, worst === 'error' ? '!' : '⚠') : null,
         ),
-        h('div', { class: 'node-summary' }, summary ? truncate(summary, 70) : h('span', { class: 'muted' }, action.Type)),
+        h('div', { class: 'node-summary' }, summary ? truncate(summary, 140) : h('span', { class: 'muted' }, action.Type)),
         h(
           'div',
           { class: 'node-outputs' },
@@ -585,6 +955,9 @@ function renderCanvas(): void {
               { class: `node-output ${o.kind}` },
               h('span', { class: 'output-label' }, truncate(o.label, 28)),
               h('span', { class: `port out ${o.kind}${o.target ? ' connected' : ''}`, dataset: { key: o.key }, title: `Drag to connect "${o.label}". Alt+click to disconnect.` }),
+              o.kind === 'error' && o.target && findAction(flow, o.target) && errorAsLabel(id, o.target)
+                ? h('span', { class: 'stub', dataset: { target: o.target }, title: `${o.label} → ${describeAction(findAction(flow, o.target)!)}\nClick to go there.` }, `→ ${shortLabel(o.target)}`)
+                : null,
             ),
           ),
         ),
@@ -598,24 +971,49 @@ function renderCanvas(): void {
 
 function renderEdges(pending?: { from: Position; to: Position }): void {
   const defs = edgesSvg.querySelector('defs')!;
-  const parts: SVGElement[] = [];
+  const layers: Record<string, SVGElement[]> = { error: [], condition: [], next: [], front: [] };
   const flow = state.flow;
   if (flow) {
     const ids = new Set(flow.Actions.map((a) => a.Identifier));
+    const obstacles: Rect[] = flow.Actions.map((a) => {
+      const p = positionOf(a.Identifier);
+      return { left: p.x, right: p.x + NODE_WIDTH, top: p.y, bottom: p.y + nodeHeight(a) };
+    });
     const draw = (from: string, key: string, kind: string, index: number, target: string | undefined) => {
       if (!target || !ids.has(target)) {
         return;
       }
+      if (kind === 'error' && errorAsLabel(from, target)) {
+        return;
+      }
       const selected = state.selectedEdge?.from === from && state.selectedEdge.key === key;
-      const d = edgePath(outputPoint(from, index), inputPoint(target));
+      const points = edgeRoute(outputPoint(from, index), inputPoint(target), index, boxOf(from), boxOf(target), obstacles);
+      const d = roundedPath(points);
       const related = state.selection.has(from) || state.selection.has(target);
-      parts.push(
-        s('path', { d, class: 'edge-hit', dataset: { from, key } }),
-        s('path', {
-          d,
-          class: `edge ${kind}${selected ? ' selected' : ''}${related ? ' related' : ''}`,
-          'marker-end': `url(#arrow-${selected ? 'selected' : kind})`,
-        }),
+      const loop = loopEdges.has(edgeKey(from, key));
+      const traced = isTraced(from, target);
+      const classes = ['edge', kind];
+      if (selected) {
+        classes.push('selected');
+      }
+      if (related) {
+        classes.push('related');
+      }
+      if (loop) {
+        classes.push('loop');
+      }
+      if (traced !== undefined) {
+        classes.push(traced ? 'traced' : 'untraced');
+      }
+      // Error paths sit underneath, and selected, related or traced ones on top, so the main path reads first.
+      (selected || related || traced ? layers.front : (layers[kind] ?? layers.next)).push(
+        s(
+          'g',
+          { class: 'edge-group', dataset: { from, to: target } },
+          s('path', { d, class: 'edge-hit', dataset: { from, key } }),
+          s('path', { d, class: classes.join(' '), 'marker-end': `url(#arrow-${selected ? 'selected' : kind})` }),
+          loop ? loopBadge(points, kind) : null,
+        ),
       );
     };
     draw(ENTRY_ID, 'next', 'next', 0, flow.StartAction);
@@ -624,9 +1022,148 @@ function renderEdges(pending?: { from: Position; to: Position }): void {
     }
   }
   if (pending) {
-    parts.push(s('path', { d: edgePath(pending.from, pending.to), class: 'edge pending', 'marker-end': 'url(#arrow-pending)' }));
+    layers.front.push(s('path', { d: roundedPath(edgeRoute(pending.from, pending.to, 0)), class: 'edge pending', 'marker-end': 'url(#arrow-pending)' }));
   }
-  edgesSvg.replaceChildren(defs, ...parts);
+  edgesSvg.replaceChildren(defs, ...layers.error, ...layers.condition, ...layers.next, ...layers.front);
+  highlightEdges(hoveredNode);
+}
+
+/** A ↻ marker in the middle of the longest straight run of a loop connection. */
+function loopBadge(points: Position[], kind: string): SVGElement {
+  let best = { x: points[0].x, y: points[0].y, length: -1 };
+  for (let i = 1; i < points.length; i++) {
+    const [a, b] = [points[i - 1], points[i]];
+    const length = Math.hypot(b.x - a.x, b.y - a.y);
+    if (length > best.length) {
+      best = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, length };
+    }
+  }
+  return s(
+    'g',
+    { class: `loop-badge ${kind}`, transform: `translate(${best.x} ${best.y})` },
+    s('title', {}, 'Loop: this connection goes back to an earlier block'),
+    s('circle', { r: 8 }),
+    s('text', { 'text-anchor': 'middle', dy: '0.35em' }, '↻'),
+  );
+}
+
+let hoveredNode: string | undefined;
+
+/** Emphasises the connections into and out of the hovered block and fades the rest. */
+function highlightEdges(id: string | undefined): void {
+  hoveredNode = id;
+  edgesSvg.classList.toggle('focus', !!id);
+  edgesSvg.querySelectorAll<SVGGElement>('.edge-group').forEach((g) => {
+    g.classList.toggle('hover', !!id && (g.dataset.from === id || g.dataset.to === id));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Hover card and connection labels
+
+let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+
+function hideHoverCard(): void {
+  clearTimeout(hoverTimer);
+  hoverCard.hidden = true;
+}
+
+function scheduleHoverCard(id: string | undefined): void {
+  hideHoverCard();
+  if (id && id !== ENTRY_ID && !drag) {
+    hoverTimer = setTimeout(() => showHoverCard(id), 450);
+  }
+}
+
+function formatValue(value: unknown): string {
+  const text = typeof value === 'string' ? value : JSON.stringify(value);
+  return truncate(text ?? '', 160);
+}
+
+/** Everything a reader needs about a block without selecting it. */
+function showHoverCard(id: string): void {
+  const flow = state.flow;
+  const action = flow && findAction(flow, id);
+  if (!flow || !action || drag) {
+    return;
+  }
+  const meta = flow.Metadata?.ActionMetadata?.[id];
+  const summary = summarizeAction(action, meta);
+  const link = linkedFlowRef(action, meta);
+  const params = Object.entries(action.Parameters ?? {});
+  const issues = issuesFor(id);
+  const MAX_PARAMS = 8;
+  hoverCard.replaceChildren(
+    ...present(
+      h(
+        'div',
+        { class: 'card-title', style: { '--cat': CATEGORY_COLORS[getBlockCategory(action.Type)] } },
+        h('span', { class: 'palette-dot' }),
+        h('strong', {}, getBlockLabel(action.Type)),
+        h('span', { class: 'muted small' }, action.Type),
+      ),
+      summary ? h('p', { class: 'card-summary' }, summary) : null,
+      link ? h('p', { class: 'card-link' }, `${link.kind === 'module' ? 'Module' : 'Flow'}: ${link.name}`, h('span', { class: 'muted' }, '  (↗ in the header opens it)')) : null,
+      params.length
+        ? h(
+            'dl',
+            { class: 'facts card-params' },
+            ...params.slice(0, MAX_PARAMS).flatMap(([key, value]) => [h('dt', {}, key), h('dd', {}, formatValue(value))]),
+            params.length > MAX_PARAMS ? h('dd', { class: 'muted' }, `+ ${params.length - MAX_PARAMS} more in the inspector`) : null,
+          )
+        : null,
+      h(
+        'ul',
+        { class: 'card-branches' },
+        ...getOutputs(action).map((o) => {
+          const target = o.target ? findAction(flow, o.target) : undefined;
+          return h(
+            'li',
+            { class: o.kind },
+            h('span', { class: 'card-branch-label' }, o.label),
+            ' → ',
+            target ? describeAction(target) : h('span', { class: 'muted' }, o.target ? 'missing block' : 'not connected'),
+            loopEdges.has(edgeKey(id, o.key)) ? h('span', { class: 'legend-loop' }, ' ↻') : null,
+          );
+        }),
+      ),
+      issues.length ? h('ul', { class: 'card-issues' }, ...issues.map((i) => h('li', { class: i.severity }, i.message))) : null,
+      h('div', { class: 'muted small card-id' }, id),
+    ),
+  );
+  hoverCard.hidden = false;
+  const rect = canvas.getBoundingClientRect();
+  const p = positionOf(id);
+  const { zoom, x, y } = state.view;
+  const right = (p.x + NODE_WIDTH) * zoom + x + 14;
+  const left = p.x * zoom + x - hoverCard.offsetWidth - 14;
+  const cardX = right + hoverCard.offsetWidth < rect.width - 8 || left < 8 ? right : left;
+  const cardY = Math.min(Math.max(8, p.y * zoom + y), rect.height - hoverCard.offsetHeight - 8);
+  hoverCard.style.left = `${Math.max(8, cardX)}px`;
+  hoverCard.style.top = `${Math.max(8, cardY)}px`;
+}
+
+function describeEdge(from: string, key: string): string {
+  const flow = state.flow!;
+  if (from === ENTRY_ID) {
+    const start = flow.StartAction ? findAction(flow, flow.StartAction) : undefined;
+    return `Entry → ${start ? describeAction(start) : ''}`;
+  }
+  const action = findAction(flow, from);
+  const output = action ? getOutputs(action).find((o) => o.key === key) : undefined;
+  const target = output?.target ? findAction(flow, output.target) : undefined;
+  if (!action || !output || !target) {
+    return '';
+  }
+  const loop = loopEdges.has(edgeKey(from, key)) ? '  ↻ loop' : '';
+  return `${getBlockLabel(action.Type)} · ${output.label} → ${describeAction(target)}${loop}`;
+}
+
+function placeEdgeTip(e: PointerEvent): void {
+  const rect = canvas.getBoundingClientRect();
+  const x = Math.min(e.clientX - rect.left + 14, rect.width - edgeTip.offsetWidth - 8);
+  edgeTip.style.left = `${Math.max(8, x)}px`;
+  edgeTip.style.top = `${e.clientY - rect.top + 16}px`;
 }
 
 /** Moves node elements to their current model positions without a full re-render. */
@@ -869,6 +1406,8 @@ function renderFlowInspector(flow: ContactFlow): (Node | null)[] {
         h('li', {}, 'Shift+drag on the canvas to select several blocks.'),
         h('li', {}, 'Scroll to pan, Ctrl+scroll to zoom, F to fit.'),
         h('li', {}, 'Ctrl+D duplicates, Delete removes, Ctrl+Z undoes.'),
+        h('li', {}, 'Select a block and press T to trace every path to it, Shift+T for paths from it.'),
+        h('li', {}, 'Hover a block or a line for details. Click a "→ Block" label to jump there.'),
       ),
     ),
   ];
@@ -907,6 +1446,7 @@ function renderActionInspector(flow: ContactFlow, action: FlowAction): (Node | n
   const category = getBlockCategory(action.Type);
   const outputs = getOutputs(action);
   const t = (action.Transitions ??= {});
+  const link = linkedFlowRef(action, flow.Metadata?.ActionMetadata?.[id]);
 
   const branchRows = outputs.map((o) => {
     const [kind, indexText] = o.key.split(':');
@@ -1008,6 +1548,30 @@ function renderActionInspector(flow: ContactFlow, action: FlowAction): (Node | n
       button('Duplicate', 'Duplicate (Ctrl+D)', duplicateSelection, { class: 'btn small' }),
       button('Delete', 'Delete (Delete)', deleteSelection, { class: 'btn small danger' }),
     ),
+    h(
+      'div',
+      { class: 'row' },
+      button('Trace paths to here', 'Highlight every path that leads to this block (T)', () => startTrace(id, 'to'), {
+        class: `btn small${state.trace?.id === id && state.trace.mode === 'to' ? ' active' : ''}`,
+      }),
+      button('Trace from here', 'Highlight everything that can happen after this block (Shift+T)', () => startTrace(id, 'from'), {
+        class: `btn small${state.trace?.id === id && state.trace.mode === 'from' ? ' active' : ''}`,
+      }),
+    ),
+    link
+      ? section(
+          link.kind === 'module' ? 'Linked module' : 'Linked flow',
+          h('div', {}, link.name),
+          link.name !== link.reference ? h('code', { class: 'muted small ref-code' }, link.reference) : null,
+          h(
+            'div',
+            { class: 'row' },
+            button('Open', 'Open the linked file if it is in this workspace', () => post({ type: 'openFlow', reference: link.reference, name: link.name }), {
+              class: 'btn small',
+            }),
+          ),
+        )
+      : null,
     issuesFor(id).length ? section('Problems', issueList(issuesFor(id), false)) : null,
     section(
       'Parameters',
@@ -1172,6 +1736,21 @@ canvas.addEventListener('pointerdown', (e) => {
   }
   const target = e.target as HTMLElement;
   canvas.focus();
+  hideHoverCard();
+  edgeTip.hidden = true;
+
+  const stub = target.closest<HTMLElement>('.stub');
+  if (stub?.dataset.target) {
+    e.preventDefault();
+    goTo(stub.dataset.target);
+    return;
+  }
+  const linkButton = target.closest<HTMLElement>('.node-link');
+  if (linkButton) {
+    e.preventDefault();
+    post({ type: 'openFlow', reference: linkButton.dataset.ref!, name: linkButton.dataset.name });
+    return;
+  }
 
   const port = target.closest<HTMLElement>('.port.out');
   const nodeEl = target.closest<HTMLElement>('.node');
@@ -1332,6 +1911,32 @@ function endDrag(e: PointerEvent): void {
   }
 }
 
+canvas.addEventListener('pointerover', (e) => {
+  const target = e.target as Element;
+  const id = drag ? undefined : target.closest<HTMLElement>('.node')?.dataset.id;
+  if (id !== hoveredNode) {
+    highlightEdges(id);
+    scheduleHoverCard(id);
+  }
+  const hit = drag ? null : target.closest<SVGPathElement>('.edge-hit');
+  const text = hit ? describeEdge(hit.dataset.from!, hit.dataset.key!) : '';
+  edgeTip.hidden = !text;
+  if (text) {
+    edgeTip.textContent = text;
+    placeEdgeTip(e);
+  }
+});
+canvas.addEventListener('pointermove', (e) => {
+  if (!edgeTip.hidden) {
+    placeEdgeTip(e);
+  }
+});
+canvas.addEventListener('pointerleave', () => {
+  highlightEdges(undefined);
+  hideHoverCard();
+  edgeTip.hidden = true;
+});
+
 canvas.addEventListener('pointerup', endDrag);
 canvas.addEventListener('pointercancel', endDrag);
 
@@ -1339,6 +1944,7 @@ canvas.addEventListener(
   'wheel',
   (e) => {
     e.preventDefault();
+    hideHoverCard();
     if (e.ctrlKey || e.metaKey) {
       zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY * 0.0025));
     } else {
@@ -1400,6 +2006,13 @@ window.addEventListener('keydown', (e) => {
     toolbar.querySelector<HTMLInputElement>('.search')?.focus();
   } else if (!mod && e.key.toLowerCase() === 'f') {
     fitToScreen(state.selection.size > 0 ? [...state.selection] : undefined);
+  } else if (e.key === 'Escape' && state.trace) {
+    clearTrace();
+  } else if (!mod && e.key.toLowerCase() === 't' && state.selection.size === 1) {
+    const id = [...state.selection][0];
+    if (id !== ENTRY_ID) {
+      startTrace(id, e.shiftKey ? 'from' : 'to');
+    }
   } else if (e.key === 'Escape') {
     state.selection.clear();
     state.selectedEdge = undefined;

@@ -12,12 +12,16 @@ import {
   deleteActions,
   detectIndent,
   duplicateActions,
+  edgeKey,
   ensurePositions,
   findAction,
+  findLoopEdges,
   getOutputs,
+  linkedFlowRef,
   newFlow,
   parseFlow,
   reachableFrom,
+  reachingTo,
   removeBranch,
   serializeFlow,
   setOutputTarget,
@@ -165,6 +169,75 @@ test('auto layout places blocks left to right by depth', () => {
   for (const ys of columns.values()) {
     assert.equal(new Set(ys).size, ys.length, 'no two blocks share a slot');
   }
+});
+
+/** a -> b -> c, with c's error branch going back to a and b's error branch to d. */
+function loopFlow(): ContactFlow {
+  const flow: ContactFlow = { Version: '2019-10-30', StartAction: 'a', Actions: [] };
+  for (const name of ['a', 'b', 'c', 'd']) {
+    addAction(flow, createAction(name === 'd' ? 'DisconnectParticipant' : 'GetParticipantInput', name), { x: 0, y: 0 });
+  }
+  setOutputTarget(flow, 'a', 'next', 'b');
+  setOutputTarget(flow, 'b', 'next', 'c');
+  setOutputTarget(flow, 'b', 'error:0', 'd');
+  setOutputTarget(flow, 'c', 'next', 'd');
+  setOutputTarget(flow, 'c', 'error:0', 'a');
+  return flow;
+}
+
+test('finds loop transitions', () => {
+  const flow = loopFlow();
+  assert.deepEqual([...findLoopEdges(flow)], [edgeKey('c', 'error:0')]);
+  assert.equal(findLoopEdges(sample()).size, 0);
+});
+
+test('auto layout points every non-loop connection forwards', () => {
+  for (const flow of [sample(), loopFlow()]) {
+    const layout = autoLayout(flow);
+    const loops = findLoopEdges(flow);
+    for (const action of flow.Actions) {
+      for (const o of getOutputs(action)) {
+        if (o.target && !loops.has(edgeKey(action.Identifier, o.key))) {
+          assert.ok(layout.get(action.Identifier)!.x < layout.get(o.target)!.x, `${action.Identifier} -> ${o.target}`);
+        }
+      }
+    }
+  }
+  // d is reached from b and c, so it goes after c (longest path), not next to c.
+  const layout = autoLayout(loopFlow());
+  assert.ok(layout.get('c')!.x < layout.get('d')!.x);
+});
+
+test('reachingTo lists every block that leads to a block', () => {
+  const flow = loopFlow();
+  assert.deepEqual([...reachingTo(flow, 'd')].sort(), ['a', 'b', 'c', 'd']);
+  setOutputTarget(flow, 'c', 'error:0', undefined);
+  assert.deepEqual([...reachingTo(flow, 'b')].sort(), ['a', 'b']);
+});
+
+test('linked flows and richer summaries', () => {
+  const transfer = createAction('TransferToFlow', 't');
+  transfer.Parameters = { ContactFlowId: 'arn:aws:connect:us-east-1:1:instance/i/contact-flow/abc' };
+  assert.deepEqual(linkedFlowRef(transfer, { parameters: { ContactFlowId: { displayName: 'Billing' } } }), {
+    reference: 'arn:aws:connect:us-east-1:1:instance/i/contact-flow/abc',
+    name: 'Billing',
+    kind: 'flow',
+  });
+  assert.equal(linkedFlowRef(transfer)!.name, 'abc');
+  const module = createAction('InvokeFlowModule', 'm');
+  module.Parameters = { FlowModuleId: 'mod-1' };
+  assert.equal(linkedFlowRef(module)!.kind, 'module');
+  assert.equal(linkedFlowRef(createAction('DisconnectParticipant')), undefined);
+
+  const compare = createAction('Compare');
+  compare.Parameters = { ComparisonValue: '$.Channel' };
+  assert.equal(summarizeAction(compare), 'Checks $.Channel');
+  const view = createAction('ShowView');
+  view.Parameters = { ViewResource: { Id: 'form' }, ViewData: { Heading: 'New case' } };
+  assert.equal(summarizeAction(view), 'View: form · “New case”');
+  const ssml = createAction('MessageParticipant');
+  ssml.Parameters = { SSML: '<speak>Hello <break time="1s"/> there</speak>' };
+  assert.equal(summarizeAction(ssml), 'Hello there');
 });
 
 test('ensurePositions fills only missing positions', () => {
