@@ -33,7 +33,7 @@
       postMessage(m) {
         window.__posted.push(m);
         if (m.type === 'ready') {
-          fetch('/samples/Sample%20inbound%20flow.json').then((r) => r.text()).then((text) => {
+          fetch('/samples/' + encodeURIComponent(new URLSearchParams(location.search).get('file') ?? 'Sample inbound flow.json')).then((r) => r.text()).then((text) => {
             window.postMessage({ type: 'document', text, fileName: 'samples/Sample inbound flow.json', fromWebview: false }, '*');
           });
         } else if (m.type === 'edit') {

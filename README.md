@@ -13,11 +13,21 @@ VS Flow Designer opens a flow's JSON file as an interactive diagram. You can mov
 ### Visual flow designer
 - **See the whole flow.** Blocks, branches and the entry point are drawn the same way the Amazon Connect designer draws them. It uses the block positions saved in the file. Notes from the Connect designer show too.
 - **Edit by dragging.** Move blocks (or a group of blocks with Shift+drag). To connect a branch, drag from its dot to a block. To disconnect it, Alt+click the dot.
-- **Add blocks from the palette.** Click a block to add it, or drag it onto the canvas. If a block is selected, the new block is connected to its first open branch.
+- **Add blocks from the palette.** On the **Blocks** tab of the left panel, click a block to add it, or drag it onto the canvas. If a block is selected, the new block is connected to its first open branch.
 - **Inspector.** Edit the parameters as JSON, choose the target of each branch, change condition operators and values, add or remove conditions and error branches, and set the start block.
 - **Checks as you edit.** You see branches that are not connected, branches that point to missing blocks, a missing start block and blocks that cannot be reached. Click a problem to go to its block.
-- **Find, fit and arrange.** Search blocks by name, type, ID or parameter value. Press **F** to fit the flow to the window. Click **Arrange** to lay out the whole flow automatically.
+- **Find, fit and arrange.** Search blocks by name, type, ID or parameter value. Press **F** to fit the flow to the window. Click **Arrange** to lay out the whole flow automatically: every connection except a loop points left to right, blocks are ordered to cross fewer lines, and the main path runs straight.
 - **Works like a normal file.** The JSON file stays the source of truth. Save, undo/redo, dirty state, Git diffs and hot exit work as they do in the text editor. You can open the JSON side by side and see the diagram update as you type.
+
+### Reading a flow
+- **Clear connections.** Lines are drawn with right angles and rounded corners. All lines into one block join a single line next to it. Green is success, blue is a condition and red is an error. A legend on the canvas explains the colors and markers.
+- **Error branches as labels.** Error branches usually all go to the same Disconnect block, so they show as a small **→ Block** label next to their dot instead of a line. Click the label to go to that block. Select a block to see its error lines, or turn on **Error lines** in the toolbar to draw them all.
+- **Key values on blocks.** Each block shows its most useful value, for example the prompt text, the attribute being checked, the queue, the view and its heading, or the Lambda function.
+- **Hover for details.** Hover a block to see its summary, parameters, where each branch goes, its problems and its ID. Hover a line to see where it comes from and goes to.
+- **Trace a path.** Select a block and press **T** to highlight every path that leads to it, or **Shift+T** for everything that can happen after it. The rest of the flow fades. Press **Esc** to stop.
+- **Loops marked.** Connections that go back to an earlier block (retries, "Back" buttons) have a ↻ marker. The block they return to has a ↻ in its header.
+- **Open linked flows.** Transfer to flow, Invoke module and Create task blocks have a **↗** button that opens the linked flow or module. It finds the file in your workspace by its Amazon Connect link, file name or flow name.
+- **Outline.** The **Outline** tab in the left panel lists the flow in the order a contact moves through it. The main path continues down the list, other branches are indented under their block, and blocks already listed show as **↪** links. Click a row to go to the block.
 
 ### Import and export (no AWS account needed)
 - **Flows view** in the activity bar. It lists every contact flow file in your workspace.
@@ -94,6 +104,9 @@ Your credentials are used only on your computer to call Amazon Connect. The exte
 | Duplicate, delete | Ctrl+D, Delete |
 | Undo, redo | Ctrl+Z, Ctrl+Y (the same as in the text editor) |
 | Find blocks | Ctrl+F, then Enter for the next match |
+| Trace paths to / from the selected block | **T** / **Shift+T**, Esc to stop |
+| Go to the target of an error branch | Click its **→ Block** label |
+| Open a linked flow or module | Click **↗** in the block header |
 
 ## Known limitations
 

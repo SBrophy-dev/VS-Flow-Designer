@@ -29,4 +29,6 @@ export type WebviewToHost =
   | { type: 'ready' }
   | { type: 'edit'; flow: ContactFlow; label: string }
   | { type: 'command'; command: WebviewCommand }
+  /** Open the flow or module a block links to (by ARN, ID or name) if it is in the workspace. */
+  | { type: 'openFlow'; reference: string; name?: string }
   | { type: 'notify'; level: 'info' | 'warning' | 'error'; message: string };

@@ -252,20 +252,73 @@ function asText(value: unknown): string | undefined {
   return undefined;
 }
 
+function friendlyParam(meta: ActionMetadata | undefined, key: string): string | undefined {
+  const metaParams = (meta?.parameters ?? {}) as Record<string, unknown>;
+  const m = metaParams[key] as Record<string, unknown> | string | undefined;
+  if (typeof m === 'string') {
+    return m;
+  }
+  return asText(m?.displayName) ?? asText(m?.text);
+}
+
+function plainText(value: string): string {
+  return value.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
 /** A one-line human summary of a block's most important parameter. */
 export function summarizeAction(action: FlowAction, meta?: ActionMetadata): string {
   const p = action.Parameters ?? {};
-  const metaParams = (meta?.parameters ?? {}) as Record<string, unknown>;
-  const friendly = (key: string): string | undefined => {
-    const m = metaParams[key] as Record<string, unknown> | string | undefined;
-    if (typeof m === 'string') {
-      return m;
-    }
-    return asText(m?.displayName) ?? asText(m?.text);
-  };
+  const friendly = (key: string) => friendlyParam(meta, key);
   const text = asText(p.Text) ?? asText(p.SSML) ?? asText(p.PromptId);
-  if (text) {
-    return text.replace(/<[^>]+>/g, '');
+  if (text && plainText(text)) {
+    return plainText(text);
+  }
+  // Block types whose most useful value is not their first parameter.
+  switch (action.Type) {
+    case 'Compare':
+      if (asText(p.ComparisonValue)) {
+        return `Checks ${asText(p.ComparisonValue)}`;
+      }
+      break;
+    case 'CheckAttribute':
+      if (asText(p.Attribute)) {
+        return `Checks ${asText(p.Attribute)}`;
+      }
+      break;
+    case 'ShowView': {
+      const view = p.ViewResource as Record<string, unknown> | undefined;
+      const heading = asText((p.ViewData as Record<string, unknown> | undefined)?.Heading);
+      const name = friendly('ViewResource') ?? shortArn(asText(view?.Id) ?? '');
+      if (name || heading) {
+        return [name && `View: ${name}`, heading && `“${heading}”`].filter(Boolean).join(' · ');
+      }
+      break;
+    }
+    case 'CreateTask': {
+      const target = linkedFlowRef(action, meta);
+      const name = asText(p.Name);
+      if (name || target) {
+        return [name && `Task: ${name}`, target && `Flow: ${target.name}`].filter(Boolean).join(' · ');
+      }
+      break;
+    }
+    case 'ConnectParticipantWithLexBot': {
+      const bot = asText(meta?.lexV2BotName) ?? (typeof p.LexBot === 'string' ? shortArn(p.LexBot) : undefined);
+      if (bot) {
+        return `Lex bot: ${bot}`;
+      }
+      break;
+    }
+    case 'Wait':
+      if (asText(p.TimeLimitSeconds)) {
+        return `Waits ${asText(p.TimeLimitSeconds)} seconds`;
+      }
+      break;
+    case 'CreateCase':
+      if (asText(meta?.templateName)) {
+        return `Template: ${asText(meta?.templateName)}`;
+      }
+      break;
   }
   const keyed: [string, string][] = [
     ['QueueId', 'Queue'],
@@ -305,6 +358,91 @@ export function summarizeAction(action: FlowAction, meta?: ActionMetadata): stri
     return value !== undefined ? `${firstKey}: ${shortArn(value)}` : firstKey;
   }
   return '';
+}
+
+export interface LinkedFlowRef {
+  /** The parameter value: an ARN, a flow ID, or a placeholder. */
+  reference: string;
+  /** The best name to show: the designer's display name, else the reference shortened. */
+  name: string;
+  kind: 'flow' | 'module';
+}
+
+/** The flow or module a block hands over to (Transfer to flow, Invoke module, Create task…). */
+export function linkedFlowRef(action: FlowAction, meta?: ActionMetadata): LinkedFlowRef | undefined {
+  const p = action.Parameters ?? {};
+  for (const [key, kind] of [['ContactFlowId', 'flow'], ['FlowModuleId', 'module']] as const) {
+    const reference = asText(p[key])?.trim();
+    if (reference) {
+      const contactFlowText = asText((meta?.ContactFlow as Record<string, unknown> | undefined)?.text);
+      return { reference, name: friendlyParam(meta, key) ?? contactFlowText ?? shortArn(reference), kind };
+    }
+  }
+  return undefined;
+}
+
+/** "<actionId>|<outputKey>" for a transition. */
+export function edgeKey(from: string, outputKey: string): string {
+  return `${from}|${outputKey}`;
+}
+
+/**
+ * Transitions that go back to a block already on the path that led to them (retry loops,
+ * "Back" buttons…). Found with a depth-first walk from the start, then from blocks the
+ * start does not reach. Returned as edgeKey() strings.
+ */
+export function findLoopEdges(flow: ContactFlow): Set<string> {
+  const byId = new Map(flow.Actions.map((a) => [a.Identifier, a]));
+  const state = new Map<string, 'open' | 'done'>();
+  const loops = new Set<string>();
+  const visit = (id: string) => {
+    state.set(id, 'open');
+    for (const output of getOutputs(byId.get(id)!)) {
+      const target = output.target;
+      if (!target || !byId.has(target)) {
+        continue;
+      }
+      const s = state.get(target);
+      if (s === 'open') {
+        loops.add(edgeKey(id, output.key));
+      } else if (!s) {
+        visit(target);
+      }
+    }
+    state.set(id, 'done');
+  };
+  if (flow.StartAction && byId.has(flow.StartAction)) {
+    visit(flow.StartAction);
+  }
+  for (const action of flow.Actions) {
+    if (!state.has(action.Identifier)) {
+      visit(action.Identifier);
+    }
+  }
+  return loops;
+}
+
+/** Blocks from which `id` can be reached, including `id` itself. */
+export function reachingTo(flow: ContactFlow, id: string): Set<string> {
+  const incoming = new Map<string, string[]>();
+  for (const action of flow.Actions) {
+    for (const output of getOutputs(action)) {
+      if (output.target) {
+        incoming.set(output.target, [...(incoming.get(output.target) ?? []), action.Identifier]);
+      }
+    }
+  }
+  const seen = new Set<string>();
+  const stack = [id];
+  while (stack.length) {
+    const current = stack.pop()!;
+    if (seen.has(current)) {
+      continue;
+    }
+    seen.add(current);
+    stack.push(...(incoming.get(current) ?? []));
+  }
+  return seen;
 }
 
 // ---------------------------------------------------------------------------
@@ -596,82 +734,154 @@ export interface LayoutOptions {
   origin?: Position;
 }
 
+interface LayoutEdge {
+  from: string;
+  to: string;
+  /** Index of the output on the source block, to line the target up with its dot. */
+  index: number;
+  weight: number;
+}
+
 /**
- * Left-to-right layered layout. Each block goes in the column of its shortest distance
- * from the start; unreachable blocks go in columns after the reachable ones.
+ * Left-to-right layered layout.
+ * - Loops are set aside, then each block goes one column after the furthest block that
+ *   leads to it (longest path), so every other connection points forwards.
+ * - Blocks in a column are ordered by where their connections come from and go to
+ *   (barycentre sweeps), which removes most crossings.
+ * - Each block is lined up with the dot that leads to it, so the main path runs straight.
+ * Error branches count for less than success and condition branches when ordering and
+ * aligning. Blocks the start does not reach go in columns after the reachable ones.
  */
 export function autoLayout(flow: ContactFlow, options: LayoutOptions = {}): Map<string, Position> {
-  const columnGap = options.columnGap ?? 90;
+  const columnGap = options.columnGap ?? 130;
   const rowGap = options.rowGap ?? 40;
   const origin = options.origin ?? { x: 40, y: 40 };
   const byId = new Map(flow.Actions.map((a) => [a.Identifier, a]));
-  const depth = new Map<string, number>();
+  const loops = findLoopEdges(flow);
+  const reachable = reachableFrom(flow, flow.StartAction);
 
-  const bfs = (start: string, startDepth: number) => {
-    const queue: string[] = [start];
-    depth.set(start, startDepth);
-    while (queue.length) {
-      const id = queue.shift()!;
-      const d = depth.get(id)!;
-      for (const output of getOutputs(byId.get(id)!)) {
-        if (output.target && byId.has(output.target) && !depth.has(output.target)) {
-          depth.set(output.target, d + 1);
-          queue.push(output.target);
+  const edges: LayoutEdge[] = [];
+  for (const action of flow.Actions) {
+    getOutputs(action).forEach((o, index) => {
+      if (o.target && byId.has(o.target) && o.target !== action.Identifier && !loops.has(edgeKey(action.Identifier, o.key))) {
+        edges.push({ from: action.Identifier, to: o.target, index, weight: o.kind === 'error' ? 0.2 : 1 });
+      }
+    });
+  }
+  const outEdges = new Map<string, LayoutEdge[]>();
+  const inEdges = new Map<string, LayoutEdge[]>();
+  for (const e of edges) {
+    outEdges.set(e.from, [...(outEdges.get(e.from) ?? []), e]);
+    inEdges.set(e.to, [...(inEdges.get(e.to) ?? []), e]);
+  }
+
+  // Depth-first order: a topological order (loops are excluded) that also follows the
+  // order of each block's outputs, used as the starting order within each column.
+  const discovery: string[] = [];
+  const postorder: string[] = [];
+  const seen = new Set<string>();
+  const walk = (id: string) => {
+    seen.add(id);
+    discovery.push(id);
+    for (const e of outEdges.get(id) ?? []) {
+      if (!seen.has(e.to)) {
+        walk(e.to);
+      }
+    }
+    postorder.push(id);
+  };
+  if (flow.StartAction && byId.has(flow.StartAction)) {
+    walk(flow.StartAction);
+  }
+  for (const action of flow.Actions) {
+    if (!seen.has(action.Identifier)) {
+      walk(action.Identifier);
+    }
+  }
+  const topo = postorder.reverse();
+
+  const layer = new Map<string, number>();
+  const assignLayers = (members: (id: string) => boolean, base: number) => {
+    for (const id of topo) {
+      if (!members(id)) {
+        continue;
+      }
+      if (!layer.has(id)) {
+        layer.set(id, base);
+      }
+      for (const e of outEdges.get(id) ?? []) {
+        if (members(e.to)) {
+          layer.set(e.to, Math.max(layer.get(e.to) ?? base, layer.get(id)! + 1));
         }
       }
     }
   };
-
-  if (flow.StartAction && byId.has(flow.StartAction)) {
-    bfs(flow.StartAction, 1);
-  }
-  let maxDepth = Math.max(0, ...depth.values());
-  for (const action of flow.Actions) {
-    if (!depth.has(action.Identifier)) {
-      bfs(action.Identifier, maxDepth + 1);
-      maxDepth = Math.max(maxDepth, ...depth.values());
-    }
-  }
+  assignLayers((id) => reachable.has(id), 1);
+  const maxReachable = Math.max(0, ...layer.values());
+  assignLayers((id) => !reachable.has(id), maxReachable + 1);
 
   const columns = new Map<number, string[]>();
-  // Order blocks in a column by the order their parents' outputs reference them.
-  const order = new Map<string, number>();
-  let counter = 0;
-  const visit = (id: string) => {
-    if (order.has(id)) {
-      return;
+  for (const id of discovery) {
+    const l = layer.get(id)!;
+    columns.set(l, [...(columns.get(l) ?? []), id]);
+  }
+  const layers = [...columns.keys()].sort((a, b) => a - b);
+
+  // Barycentre ordering. A block's key is the weighted average position of its
+  // neighbours in other columns; output index nudges siblings into dot order.
+  const rank = new Map<string, number>();
+  const updateRanks = () => {
+    for (const ids of columns.values()) {
+      ids.forEach((id, i) => rank.set(id, i));
     }
-    order.set(id, counter++);
   };
-  if (flow.StartAction) {
-    visit(flow.StartAction);
-  }
-  const sortedByDepth = [...depth.entries()].sort((a, b) => a[1] - b[1]).map(([id]) => id);
-  for (const id of sortedByDepth) {
-    visit(id);
-    for (const output of getOutputs(byId.get(id)!)) {
-      if (output.target && byId.has(output.target)) {
-        visit(output.target);
+  updateRanks();
+  const sortColumn = (ids: string[], neighbours: (id: string) => { id: string; offset: number; weight: number }[]) => {
+    const key = new Map<string, number>();
+    for (const id of ids) {
+      let sum = 0;
+      let total = 0;
+      for (const n of neighbours(id)) {
+        sum += (rank.get(n.id)! + n.offset) * n.weight;
+        total += n.weight;
       }
+      key.set(id, total > 0 ? sum / total : rank.get(id)!);
     }
-  }
-  for (const id of sortedByDepth) {
-    const d = depth.get(id)!;
-    if (!columns.has(d)) {
-      columns.set(d, []);
+    ids.sort((a, b) => key.get(a)! - key.get(b)! || rank.get(a)! - rank.get(b)!);
+  };
+  const outputCount = (id: string) => getOutputs(byId.get(id)!).length + 1;
+  for (let pass = 0; pass < 4; pass++) {
+    for (const l of layers.slice(1)) {
+      sortColumn(columns.get(l)!, (id) =>
+        (inEdges.get(id) ?? []).map((e) => ({ id: e.from, offset: e.index / outputCount(e.from), weight: e.weight })),
+      );
+      updateRanks();
     }
-    columns.get(d)!.push(id);
+    for (const l of layers.slice(0, -1).reverse()) {
+      sortColumn(columns.get(l)!, (id) => (outEdges.get(id) ?? []).map((e) => ({ id: e.to, offset: 0, weight: e.weight })));
+      updateRanks();
+    }
   }
 
   const positions = new Map<string, Position>();
   positions.set(ENTRY_ID, { x: origin.x, y: origin.y });
-  for (const [d, ids] of columns) {
-    ids.sort((a, b) => order.get(a)! - order.get(b)!);
-    let y = origin.y;
-    const x = origin.x + 140 + (d - 1) * (NODE_WIDTH + columnGap);
-    for (const id of ids) {
+  // Lines the input dot (half a header down) up with the source's output dot. The start
+  // block sits a few pixels lower so its input lines up with the entry point's dot.
+  const outputY = (id: string, index: number) =>
+    positions.get(id)!.y + NODE_HEADER_HEIGHT + NODE_SUMMARY_HEIGHT + index * NODE_OUTPUT_HEIGHT + NODE_OUTPUT_HEIGHT / 2;
+  for (const l of layers) {
+    let nextFree = origin.y;
+    const x = origin.x + 140 + (l - 1) * (NODE_WIDTH + columnGap);
+    for (const id of columns.get(l)!) {
+      const incoming = (inEdges.get(id) ?? []).filter((e) => positions.has(e.from));
+      let desired = id === flow.StartAction ? origin.y + 3 : nextFree;
+      if (incoming.length) {
+        const total = incoming.reduce((sum, e) => sum + e.weight, 0);
+        desired = incoming.reduce((sum, e) => sum + (outputY(e.from, e.index) - NODE_HEADER_HEIGHT / 2) * e.weight, 0) / total;
+      }
+      const y = Math.max(desired, nextFree);
       positions.set(id, { x, y });
-      y += nodeHeight(byId.get(id)!) + rowGap;
+      nextFree = y + nodeHeight(byId.get(id)!) + rowGap;
     }
   }
   return positions;
